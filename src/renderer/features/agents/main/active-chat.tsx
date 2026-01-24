@@ -78,7 +78,7 @@ import { DiffCenterPeekDialog } from "../../changes/components/diff-center-peek-
 import { DiffFullPageView } from "../../changes/components/diff-full-page-view"
 import { DiffSidebarHeader } from "../../changes/components/diff-sidebar-header"
 import { getStatusIndicator } from "../../changes/utils/status"
-import { terminalSidebarOpenAtom } from "../../terminal/atoms"
+import { terminalSidebarOpenAtomFamily } from "../../terminal/atoms"
 import { TerminalSidebar } from "../../terminal/terminal-sidebar"
 import {
   agentsChangesPanelCollapsedAtom,
@@ -3643,20 +3643,20 @@ const ChatViewInner = memo(function ChatViewInner({
   // Update pending plan approvals atom for sidebar indicators
   const setPendingPlanApprovals = useSetAtom(pendingPlanApprovalsAtom)
   useEffect(() => {
-    setPendingPlanApprovals((prev: Set<string>) => {
-      const newSet = new Set(prev)
+    setPendingPlanApprovals((prev: Map<string, string>) => {
+      const newMap = new Map(prev)
       if (hasUnapprovedPlan) {
-        newSet.add(subChatId)
+        newMap.set(subChatId, parentChatId)
       } else {
-        newSet.delete(subChatId)
+        newMap.delete(subChatId)
       }
-      // Only return new set if it changed
-      if (newSet.size !== prev.size || ![...newSet].every((id) => prev.has(id))) {
-        return newSet
+      // Only return new map if it changed
+      if (newMap.size !== prev.size || ![...newMap.keys()].every((id) => prev.has(id))) {
+        return newMap
       }
       return prev
     })
-  }, [hasUnapprovedPlan, subChatId, setPendingPlanApprovals])
+  }, [hasUnapprovedPlan, subChatId, parentChatId, setPendingPlanApprovals])
 
   // Keyboard shortcut: Cmd+Enter to approve plan
   useEffect(() => {
@@ -3707,11 +3707,11 @@ const ChatViewInner = memo(function ChatViewInner({
   // Clean up pending plan approval when unmounting
   useEffect(() => {
     return () => {
-      setPendingPlanApprovals((prev: Set<string>) => {
+      setPendingPlanApprovals((prev: Map<string, string>) => {
         if (prev.has(subChatId)) {
-          const newSet = new Set(prev)
-          newSet.delete(subChatId)
-          return newSet
+          const newMap = new Map(prev)
+          newMap.delete(subChatId)
+          return newMap
         }
         return prev
       })
@@ -4033,7 +4033,7 @@ export function ChatView({
   const setJustCreatedIds = useSetAtom(justCreatedIdsAtom)
   const selectedChatId = useAtomValue(selectedAgentChatIdAtom)
   const setUndoStack = useSetAtom(undoStackAtom)
-  const { notifyAgentComplete, notifyAgentNeedsInput, notifyPlanReady } = useDesktopNotifications()
+  const { notifyAgentComplete } = useDesktopNotifications()
 
   // Check if any chat has unseen changes
   const hasAnyUnseenChanges = unseenChanges.size > 0
@@ -4047,23 +4047,38 @@ export function ChatView({
     [chatId],
   )
   const [isDiffSidebarOpen, setIsDiffSidebarOpen] = useAtom(diffSidebarAtom)
-  // Per-chat plan sidebar state - each chat remembers its own open/close state
+  // Subscribe to activeSubChatId for plan sidebar (needs to update when switching sub-chats)
+  const activeSubChatIdForPlan = useAgentSubChatStore((state) => state.activeSubChatId)
+
+  // Per-subChat plan sidebar state - each sub-chat remembers its own open/close state
   const planSidebarAtom = useMemo(
-    () => planSidebarOpenAtomFamily(chatId),
-    [chatId],
+    () => planSidebarOpenAtomFamily(activeSubChatIdForPlan || ""),
+    [activeSubChatIdForPlan],
   )
   const [isPlanSidebarOpen, setIsPlanSidebarOpen] = useAtom(planSidebarAtom)
   const currentPlanPathAtom = useMemo(
-    () => currentPlanPathAtomFamily(chatId),
-    [chatId],
+    () => currentPlanPathAtomFamily(activeSubChatIdForPlan || ""),
+    [activeSubChatIdForPlan],
   )
   const [currentPlanPath, setCurrentPlanPath] = useAtom(currentPlanPathAtom)
+
+  // Close plan sidebar when switching to a sub-chat that has no plan
+  const prevSubChatIdRef = useRef(activeSubChatIdForPlan)
+  useEffect(() => {
+    if (prevSubChatIdRef.current !== activeSubChatIdForPlan) {
+      // Sub-chat changed - if new one has no plan path, close sidebar
+      if (!currentPlanPath) {
+        setIsPlanSidebarOpen(false)
+      }
+      prevSubChatIdRef.current = activeSubChatIdForPlan
+    }
+  }, [activeSubChatIdForPlan, currentPlanPath, setIsPlanSidebarOpen])
   const setPendingBuildPlanSubChatId = useSetAtom(pendingBuildPlanSubChatIdAtom)
 
   // Read plan edit refetch trigger from atom (set by ChatViewInner when Edit completes)
   const planEditRefetchTriggerAtom = useMemo(
-    () => planEditRefetchTriggerAtomFamily(chatId),
-    [chatId],
+    () => planEditRefetchTriggerAtomFamily(activeSubChatIdForPlan || ""),
+    [activeSubChatIdForPlan],
   )
   const planEditRefetchTrigger = useAtomValue(planEditRefetchTriggerAtom)
 
@@ -4076,9 +4091,12 @@ export function ChatView({
     }
   }, [setPendingBuildPlanSubChatId])
 
-  const [isTerminalSidebarOpen, setIsTerminalSidebarOpen] = useAtom(
-    terminalSidebarOpenAtom,
+  // Per-chat terminal sidebar state - each chat remembers its own open/close state
+  const terminalSidebarAtom = useMemo(
+    () => terminalSidebarOpenAtomFamily(chatId),
+    [chatId],
   )
+  const [isTerminalSidebarOpen, setIsTerminalSidebarOpen] = useAtom(terminalSidebarAtom)
   const [diffStats, setDiffStatsRaw] = useState({
     fileCount: 0,
     additions: 0,
@@ -4931,6 +4949,40 @@ Make sure to preserve all functionality from both branches when resolving confli
     }
   }, [agentChat, chatId])
 
+  // Auto-detect plan path from ACTIVE sub-chat messages when sub-chat changes
+  // This ensures the plan sidebar shows the correct plan for the active sub-chat only
+  useEffect(() => {
+    if (!agentSubChats || agentSubChats.length === 0 || !activeSubChatIdForPlan) {
+      setCurrentPlanPath(null)
+      return
+    }
+
+    // Find the active sub-chat
+    const activeSubChat = agentSubChats.find(sc => sc.id === activeSubChatIdForPlan)
+    if (!activeSubChat) {
+      setCurrentPlanPath(null)
+      return
+    }
+
+    // Find last plan file path from active sub-chat only
+    let lastPlanPath: string | null = null
+    const messages = (activeSubChat.messages as any[]) || []
+    for (const msg of messages) {
+      if (msg.role !== "assistant") continue
+      const parts = msg.parts || []
+      for (const part of parts) {
+        if (
+          part.type === "tool-Write" &&
+          isPlanFile(part.input?.file_path || "")
+        ) {
+          lastPlanPath = part.input.file_path
+        }
+      }
+    }
+
+    setCurrentPlanPath(lastPlanPath)
+  }, [agentSubChats, activeSubChatIdForPlan, setCurrentPlanPath])
+
   // Create or get Chat instance for a sub-chat
   const getOrCreateChat = useCallback(
     (subChatId: string): Chat<any> | null => {
@@ -5238,32 +5290,9 @@ Make sure to preserve all functionality from both branches when resolving confli
     return () => window.removeEventListener("keydown", handleKeyDown)
   }, [handleCreateNewSubChat])
 
-  // desktop notification for pending user questions (when window is not focused)
-  const pendingUserQuestions = useAtomValue(pendingUserQuestionsAtom)
-  const prevPendingQuestionsRef = useRef<typeof pendingUserQuestions>(null)
-  useEffect(() => {
-    // only trigger on new question appearing, not on every re-render
-    const hadQuestion = !!prevPendingQuestionsRef.current
-    const hasQuestion = !!pendingUserQuestions
-    prevPendingQuestionsRef.current = pendingUserQuestions
-
-    if (!hadQuestion && hasQuestion) {
-      notifyAgentNeedsInput(agentChat?.name || "Agent")
-    }
-  }, [pendingUserQuestions, notifyAgentNeedsInput, agentChat?.name])
-
-  // desktop notification for pending plan approvals (when window is not focused)
-  const pendingPlanApprovals = useAtomValue(pendingPlanApprovalsAtom)
-  const prevPendingPlansRef = useRef<Set<string>>(new Set())
-  useEffect(() => {
-    // Check if there are new pending plans (not just re-renders)
-    const newPlans = [...pendingPlanApprovals].filter(id => !prevPendingPlansRef.current.has(id))
-    prevPendingPlansRef.current = new Set(pendingPlanApprovals)
-
-    if (newPlans.length > 0) {
-      notifyPlanReady(agentChat?.name || "Agent")
-    }
-  }, [pendingPlanApprovals, notifyPlanReady, agentChat?.name])
+  // NOTE: Desktop notifications for pending questions are now triggered directly
+  // in ipc-chat-transport.ts when the ask-user-question chunk arrives.
+  // This prevents duplicate notifications from multiple ChatView instances.
 
   // Multi-select state for sub-chats (for Cmd+W bulk close)
   const selectedSubChatIds = useAtomValue(selectedSubChatIdsAtom)
@@ -5925,6 +5954,33 @@ Make sure to preserve all functionality from both branches when resolving confli
           )}
         </div>
 
+        {/* Plan Sidebar - shows plan files on the right (leftmost right sidebar) */}
+        {/* Only show when we have an active sub-chat with a plan */}
+        {!isMobileFullscreen && activeSubChatIdForPlan && (
+          <ResizableSidebar
+            isOpen={isPlanSidebarOpen && !!currentPlanPath}
+            onClose={() => setIsPlanSidebarOpen(false)}
+            widthAtom={agentsPlanSidebarWidthAtom}
+            minWidth={400}
+            maxWidth={800}
+            side="right"
+            animationDuration={0}
+            initialWidth={0}
+            exitWidth={0}
+            showResizeTooltip={true}
+            className="bg-tl-background border-l"
+            style={{ borderLeftWidth: "0.5px" }}
+          >
+            <AgentPlanSidebar
+              chatId={activeSubChatIdForPlan}
+              planPath={currentPlanPath}
+              onClose={() => setIsPlanSidebarOpen(false)}
+              onBuildPlan={handleApprovePlanFromSidebar}
+              refetchTrigger={planEditRefetchTrigger}
+            />
+          </ResizableSidebar>
+        )}
+
         {/* Diff View - hidden on mobile fullscreen and when diff is not available */}
         {/* Supports three display modes: side-peek (sidebar), center-peek (dialog), full-page */}
         {/* Wrapped in DiffStateProvider to isolate diff state and prevent ChatView re-renders */}
@@ -6052,32 +6108,6 @@ Make sure to preserve all functionality from both branches when resolving confli
                 onClose={() => setIsPreviewSidebarOpen(false)}
               />
             )}
-          </ResizableSidebar>
-        )}
-
-        {/* Plan Sidebar - shows plan files on the right */}
-        {!isMobileFullscreen && (
-          <ResizableSidebar
-            isOpen={isPlanSidebarOpen && !!currentPlanPath}
-            onClose={() => setIsPlanSidebarOpen(false)}
-            widthAtom={agentsPlanSidebarWidthAtom}
-            minWidth={400}
-            maxWidth={800}
-            side="right"
-            animationDuration={0}
-            initialWidth={0}
-            exitWidth={0}
-            showResizeTooltip={true}
-            className="bg-tl-background border-l"
-            style={{ borderLeftWidth: "0.5px" }}
-          >
-            <AgentPlanSidebar
-              chatId={chatId}
-              planPath={currentPlanPath}
-              onClose={() => setIsPlanSidebarOpen(false)}
-              onBuildPlan={handleApprovePlanFromSidebar}
-              refetchTrigger={planEditRefetchTrigger}
-            />
           </ResizableSidebar>
         )}
 

@@ -600,8 +600,8 @@ export const pendingUserQuestionsAtom = atom<Map<string, PendingUserQuestion>>(n
 export type PendingUserQuestions = PendingUserQuestion
 
 // Track sub-chats with pending plan approval (plan ready but not yet implemented)
-// Set<subChatId>
-export const pendingPlanApprovalsAtom = atom<Set<string>>(new Set())
+// Map<subChatId, parentChatId> - allows filtering by workspace
+export const pendingPlanApprovalsAtom = atom<Map<string, string>>(new Map())
 
 // Pending "Build plan" trigger - set by ChatView sidebar, consumed by ChatViewInner
 // Contains subChatId to approve, null when no pending approval

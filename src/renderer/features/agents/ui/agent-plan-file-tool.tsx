@@ -29,7 +29,8 @@ interface AgentPlanFileToolProps {
     }
   }
   chatStatus?: string
-  chatId: string
+  subChatId: string
+  isEdit?: boolean // Whether this represents an edit operation (for messaging)
 }
 
 /**
@@ -40,7 +41,8 @@ interface AgentPlanFileToolProps {
 export const AgentPlanFileTool = memo(function AgentPlanFileTool({
   part,
   chatStatus,
-  chatId,
+  subChatId,
+  isEdit = false,
 }: AgentPlanFileToolProps) {
   const [isExpanded, setIsExpanded] = useState(false)
   const { isPending } = getToolStatus(part, chatStatus)
@@ -53,14 +55,14 @@ export const AgentPlanFileTool = memo(function AgentPlanFileTool({
   const topGradientRef = useRef<HTMLDivElement>(null)
   const bottomGradientRef = useRef<HTMLDivElement>(null)
 
-  // Plan sidebar atoms
+  // Plan sidebar atoms - per subChat
   const planSidebarOpenAtom = useMemo(
-    () => planSidebarOpenAtomFamily(chatId),
-    [chatId],
+    () => planSidebarOpenAtomFamily(subChatId),
+    [subChatId],
   )
   const currentPlanPathAtom = useMemo(
-    () => currentPlanPathAtomFamily(chatId),
-    [chatId],
+    () => currentPlanPathAtomFamily(subChatId),
+    [subChatId],
   )
   const [, setIsPlanSidebarOpen] = useAtom(planSidebarOpenAtom)
   const [, setCurrentPlanPath] = useAtom(currentPlanPathAtom)
@@ -151,7 +153,7 @@ export const AgentPlanFileTool = memo(function AgentPlanFileTool({
         <span className="text-xs text-muted-foreground">
           {shouldShowShimmer ? (
             <TextShimmer as="span" duration={1.2}>
-              Creating plan...
+              {isEdit ? "Updating plan..." : "Creating plan..."}
             </TextShimmer>
           ) : (
             "Plan"
@@ -172,7 +174,7 @@ export const AgentPlanFileTool = memo(function AgentPlanFileTool({
           <PlanIcon className="w-3.5 h-3.5 flex-shrink-0 text-muted-foreground" />
           {shouldShowShimmer ? (
             <TextShimmer as="span" duration={1.2} className="truncate">
-              Creating plan...
+              {isEdit ? "Updating plan..." : "Creating plan..."}
             </TextShimmer>
           ) : (
             <span className="truncate text-foreground font-medium">Plan</span>

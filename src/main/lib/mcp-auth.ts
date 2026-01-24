@@ -133,13 +133,14 @@ export async function fetchMcpToolsStdio(config: {
   }
 }
 
-const IS_DEV = !!process.env.ELECTRON_RENDERER_URL;
+import { AUTH_SERVER_PORT, IS_DEV } from '../constants';
+
 const OAUTH_TIMEOUT_MS = 5 * 60 * 1000;
 
 function getMcpOAuthRedirectUri(): string {
   return IS_DEV
-    ? 'http://localhost:21321/mcp-oauth/callback'
-    : 'http://127.0.0.1:21321/mcp-oauth/callback';
+    ? `http://localhost:${AUTH_SERVER_PORT}/mcp-oauth/callback`
+    : `http://127.0.0.1:${AUTH_SERVER_PORT}/mcp-oauth/callback`;
 }
 
 interface PendingOAuth {

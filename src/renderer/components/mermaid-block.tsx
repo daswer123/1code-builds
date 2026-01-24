@@ -206,7 +206,6 @@ const MermaidBlockInner = memo(function MermaidBlockInner({
   const [isFullscreen, setIsFullscreen] = useState(false)
   const renderIdRef = useRef(0)
   const debounceTimeoutRef = useRef<NodeJS.Timeout | null>(null)
-  const retryCountRef = useRef(0)
   // Track the last successfully rendered code to avoid re-rendering same content
   const lastRenderedCodeRef = useRef<string>("")
   const lastRenderedThemeRef = useRef<boolean | null>(null)
@@ -243,7 +242,6 @@ const MermaidBlockInner = memo(function MermaidBlockInner({
       setRenderState({ status: "success", svg })
       lastRenderedCodeRef.current = code
       lastRenderedThemeRef.current = isDark
-      retryCountRef.current = 0
 
       // Clean up any error artifacts mermaid left in DOM
       cleanupMermaidErrors()
@@ -256,26 +254,13 @@ const MermaidBlockInner = memo(function MermaidBlockInner({
       // Clean up error SVGs that mermaid adds to DOM
       cleanupMermaidErrors()
 
-      // Check if this is a parse/syntax error (incomplete diagram) or a DOM error (race condition)
+      // Check if this is a parse/syntax error (incomplete diagram)
       const isParseError = message.toLowerCase().includes("parse error") ||
         message.toLowerCase().includes("syntax error") ||
         message.toLowerCase().includes("expecting") ||
         message.toLowerCase().includes("unexpected") ||
         message.toLowerCase().includes("no diagram type detected") ||
-        message.toLowerCase().includes("lexical error") ||
-        message.toLowerCase().includes("cannot read properties of null") ||
-        message.toLowerCase().includes("firstchild")
-
-      // Check if it's a DOM race condition error - retry automatically
-      const isDomError = message.toLowerCase().includes("cannot read properties of null") ||
-        message.toLowerCase().includes("firstchild")
-
-      // DOM race condition errors are transient - just show parsing state
-      // The next render attempt will likely succeed
-      if (isDomError) {
-        setRenderState({ status: "parsing" })
-        return
-      }
+        message.toLowerCase().includes("lexical error")
 
       if (isParseError && !lastRenderedCodeRef.current) {
         // Show "Creating diagram..." only if we haven't successfully rendered before
@@ -367,17 +352,6 @@ const MermaidBlockInner = memo(function MermaidBlockInner({
     }
   }, [])
 
-  // Auto-retry when in parsing state (may be due to DOM race condition)
-  useEffect(() => {
-    if (renderState.status === "parsing" && retryCountRef.current < 3) {
-      const retryTimeout = setTimeout(() => {
-        retryCountRef.current += 1
-        renderDiagram()
-      }, 300)
-      return () => clearTimeout(retryTimeout)
-    }
-  }, [renderState.status, renderDiagram])
-
   const handleCopy = useCallback(async () => {
     await navigator.clipboard.writeText(code)
     setCopied(true)
@@ -461,7 +435,10 @@ const MermaidBlockInner = memo(function MermaidBlockInner({
           )}
 
           {(renderState.status === "loading" || renderState.status === "parsing") && (
-            <span className="text-muted-foreground text-sm">Creating diagram...</span>
+            <div className="flex items-center gap-2 text-muted-foreground text-sm">
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+              <span>Creating diagram...</span>
+            </div>
           )}
 
           {renderState.status === "success" && (

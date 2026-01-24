@@ -109,7 +109,12 @@ const ERROR_TOAST_CONFIG: Record<
     title: "Authentication failed",
     description: "Your session may have expired. Try logging in again.",
   },
-  // SDK_ERROR is handled dynamically below to include full error details in copy
+  USAGE_POLICY_VIOLATION: {
+    title: "Request declined",
+    // description will be set from chunk.errorText which contains the full API error message
+    description: "",
+  },
+  // SDK_ERROR and other unknown errors use chunk.errorText for description
 }
 
 type UIMessageChunk = any // Inferred from subscription
@@ -152,9 +157,10 @@ export class IPCChatTransport implements ChatTransport<UIMessage> {
 
     // Read extended thinking setting dynamically (so toggle applies to existing chats)
     const thinkingEnabled = appStore.get(extendedThinkingEnabledAtom)
-    // Max thinking tokens: 64000 is the max for claude-opus-4-5-20251101
-    // (128000 was causing "max_tokens: 128001 > 64000" errors)
-    const maxThinkingTokens = thinkingEnabled ? 64_000 : undefined
+    // Max thinking tokens for extended thinking mode
+    // SDK adds +1 internally, so 64000 becomes 64001 which exceeds Opus 4.5 limit
+    // Using 32000 to stay safely under the 64000 max output tokens limit
+    const maxThinkingTokens = thinkingEnabled ? 32_000 : undefined
     const historyEnabled = appStore.get(historyEnabledAtom)
 
     // Read model selection dynamically (so model changes apply to existing chats)
@@ -363,7 +369,12 @@ export class IPCChatTransport implements ChatTransport<UIMessage> {
                 // Show toast based on error category
                 const config = ERROR_TOAST_CONFIG[category]
                 const title = config?.title || "Claude error"
-                const description = config?.description || chunk.errorText || "An unexpected error occurred"
+                // Use config description if set, otherwise fall back to errorText
+                const rawDescription = config?.description || chunk.errorText || "An unexpected error occurred"
+                // Truncate long descriptions for toast (keep first 300 chars)
+                const description = rawDescription.length > 300
+                  ? rawDescription.slice(0, 300) + "..."
+                  : rawDescription
 
                 toast.error(title, {
                   description,

@@ -1249,8 +1249,10 @@ ${prompt}
                 // Check for error messages from SDK (error can be embedded in message payload!)
                 const msgAny = msg as any
                 if (msgAny.type === "error" || msgAny.error) {
-                  const sdkError =
-                    msgAny.error || msgAny.message || "Unknown SDK error"
+                  // Extract detailed error text from message content if available
+                  // This is where the actual error description lives (e.g., "API Error: Claude Code is unable to respond...")
+                  const messageText = msgAny.message?.content?.[0]?.text
+                  const sdkError = messageText || msgAny.error || msgAny.message || "Unknown SDK error"
                   lastError = new Error(sdkError)
 
                   // Detailed SDK error logging in main process
@@ -1271,11 +1273,14 @@ ${prompt}
                   console.error(`[CLAUDE SDK ERROR] ========================================`)
 
                   // Categorize SDK-level errors
+                  // Use the raw error code (e.g., "invalid_request") for category matching
+                  const rawErrorCode = msgAny.error || ""
                   let errorCategory = "SDK_ERROR"
-                  let errorContext = "Claude SDK error"
+                  // Default errorContext to the full error text (which may include detailed message)
+                  let errorContext = sdkError
 
                   if (
-                    sdkError === "authentication_failed" ||
+                    rawErrorCode === "authentication_failed" ||
                     sdkError.includes("authentication")
                   ) {
                     errorCategory = "AUTH_FAILED_SDK"
@@ -1288,23 +1293,31 @@ ${prompt}
                     errorCategory = "MCP_INVALID_TOKEN"
                     errorContext = "Invalid access token. Update MCP settings"
                   } else if (
-                    sdkError === "invalid_api_key" ||
+                    rawErrorCode === "invalid_api_key" ||
                     sdkError.includes("api_key")
                   ) {
                     errorCategory = "INVALID_API_KEY_SDK"
                     errorContext = "Invalid API key in Claude Code CLI"
                   } else if (
-                    sdkError === "rate_limit_exceeded" ||
+                    rawErrorCode === "rate_limit_exceeded" ||
                     sdkError.includes("rate")
                   ) {
                     errorCategory = "RATE_LIMIT_SDK"
                     errorContext = "Session limit reached"
                   } else if (
-                    sdkError === "overloaded" ||
+                    rawErrorCode === "overloaded" ||
                     sdkError.includes("overload")
                   ) {
                     errorCategory = "OVERLOADED_SDK"
                     errorContext = "Claude is overloaded, try again later"
+                  } else if (
+                    rawErrorCode === "invalid_request" ||
+                    sdkError.includes("Usage Policy") ||
+                    sdkError.includes("violate")
+                  ) {
+                    // Usage Policy violation - keep the full detailed error text
+                    errorCategory = "USAGE_POLICY_VIOLATION"
+                    // errorContext already contains the full message from sdkError
                   }
 
                   // Emit auth-error for authentication failures, regular error otherwise
@@ -1319,7 +1332,7 @@ ${prompt}
                       errorText: errorContext,
                       debugInfo: {
                         category: errorCategory,
-                        sdkError: sdkError,
+                        rawErrorCode,
                         sessionId: msgAny.session_id,
                         messageId: msgAny.message?.id,
                       },
@@ -1329,8 +1342,8 @@ ${prompt}
                   console.log(`[SD] M:END sub=${subId} reason=sdk_error cat=${errorCategory} n=${chunkCount}`)
                   console.error(`[SD] SDK Error details:`, {
                     errorCategory,
-                    errorContext,
-                    sdkError,
+                    errorContext: errorContext.slice(0, 200), // Truncate for log readability
+                    rawErrorCode,
                     sessionId: msgAny.session_id,
                     messageId: msgAny.message?.id,
                     fullMessage: JSON.stringify(msgAny, null, 2),

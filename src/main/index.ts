@@ -30,8 +30,7 @@ import { cleanupGitWatchers } from "./lib/git/watcher"
 import { cancelAllPendingOAuth, handleMcpOAuthCallback } from "./lib/mcp-auth"
 import { createMainWindow, getWindow } from "./windows/main"
 
-// Dev mode detection
-const IS_DEV = !!process.env.ELECTRON_RENDERER_URL
+import { IS_DEV, AUTH_SERVER_PORT } from "./constants"
 
 // Deep link protocol (must match package.json build.protocols.schemes)
 // Use different protocol in dev to avoid conflicts with production app
@@ -249,9 +248,9 @@ const FAVICON_SVG = `<svg width="32" height="32" viewBox="0 0 1024 1024" fill="n
 const FAVICON_DATA_URI = `data:image/svg+xml,${encodeURIComponent(FAVICON_SVG)}`
 
 // Start local HTTP server for auth callbacks
-// This catches http://localhost:21321/auth/callback?code=xxx and /mcp-oauth/callback
+// This catches http://localhost:{AUTH_SERVER_PORT}/auth/callback?code=xxx and /mcp-oauth/callback
 const server = createServer((req, res) => {
-    const url = new URL(req.url || "", "http://localhost:21321")
+    const url = new URL(req.url || "", `http://localhost:${AUTH_SERVER_PORT}`)
 
     // Serve favicon
     if (url.pathname === "/favicon.ico" || url.pathname === "/favicon.svg") {
@@ -430,8 +429,8 @@ const server = createServer((req, res) => {
     }
   })
 
-server.listen(21321, () => {
-  console.log("[Auth Server] Listening on http://localhost:21321")
+server.listen(AUTH_SERVER_PORT, () => {
+  console.log(`[Auth Server] Listening on http://localhost:${AUTH_SERVER_PORT}`)
 })
 
 // Clean up stale lock files from crashed instances

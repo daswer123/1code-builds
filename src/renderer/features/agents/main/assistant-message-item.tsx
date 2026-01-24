@@ -291,15 +291,39 @@ export const AssistantMessageItem = memo(function AssistantMessageItem({
     return { nestedToolsMap, nestedToolIds, orphanTaskGroups, orphanToolCallIds, orphanFirstToolCallIds }
   }, [messageParts])
 
-  // Find last plan file Write part for showing card in collapsed view (Edit doesn't show card)
-  const lastPlanFilePart = useMemo(() => {
-    for (let i = messageParts.length - 1; i >= 0; i--) {
+  // Collect all plan operations (Write/Edit) for unified handling
+  const planOpsSummary = useMemo(() => {
+    const operations: Array<{ type: "write" | "edit"; part: any; index: number }> = []
+
+    for (let i = 0; i < messageParts.length; i++) {
       const part = messageParts[i]
-      if (part.type === "tool-Write" && isPlanFile(part.input?.file_path || "")) {
-        return { part, index: i }
+      const filePath = part.input?.file_path || ""
+
+      if ((part.type === "tool-Write" || part.type === "tool-Edit") && isPlanFile(filePath)) {
+        operations.push({
+          type: part.type === "tool-Write" ? "write" : "edit",
+          part,
+          index: i,
+        })
       }
     }
-    return null
+
+    if (operations.length === 0) {
+      return { operations: [], hasAnyPlanOperation: false, isStreaming: false, lastOperationType: null as "write" | "edit" | null }
+    }
+
+    const isStreaming = operations.some(op =>
+      op.part.state === "input-streaming" || op.part.state === "pending"
+    )
+
+    const lastOp = operations[operations.length - 1]
+
+    return {
+      operations,
+      hasAnyPlanOperation: true,
+      isStreaming,
+      lastOperationType: lastOp.type,
+    }
   }, [messageParts])
 
   // Collapsing logic: collapse only if final text exists after tools
@@ -340,6 +364,19 @@ export const AssistantMessageItem = memo(function AssistantMessageItem({
 
     return { shouldCollapse, visibleStepsCount, collapseBeforeIndex }
   }, [messageParts, isStreaming, isLastMessage, nestedToolIds, orphanToolCallIds, orphanFirstToolCallIds])
+
+  // Check if any plan operation is in collapsed steps (before collapseBeforeIndex)
+  const hasPlanInCollapsedSteps = useMemo(() => {
+    if (!shouldCollapse || collapseBeforeIndex === -1) return false
+    return planOpsSummary.operations.some(op => op.index < collapseBeforeIndex)
+  }, [shouldCollapse, collapseBeforeIndex, planOpsSummary.operations])
+
+  // Get the last plan operation from collapsed steps for showing card
+  const lastCollapsedPlanOp = useMemo(() => {
+    if (!hasPlanInCollapsedSteps) return null
+    const collapsedOps = planOpsSummary.operations.filter(op => op.index < collapseBeforeIndex)
+    return collapsedOps[collapsedOps.length - 1] || null
+  }, [hasPlanInCollapsedSteps, planOpsSummary.operations, collapseBeforeIndex])
 
   const stepParts = useMemo(() => {
     if (!shouldCollapse || collapseBeforeIndex === -1) return []
@@ -410,33 +447,62 @@ export const AssistantMessageItem = memo(function AssistantMessageItem({
     if (part.type === "tool-Bash") return <AgentBashTool key={idx} part={part} messageId={message.id} partIndex={idx} chatStatus={status} />
     if (part.type === "tool-Thinking") return <AgentThinkingTool key={idx} part={part} chatStatus={status} />
 
-    // Plan files: Write shows full Plan card, Edit shows "Updating plan..." / "Updated plan"
+    // Plan files: unified handling
+    // - In collapsed steps: all show mini indicator, last collapsed op's card shown separately after finalParts
+    // - In final parts: all but last show mini indicator, last shows full card
     if (part.type === "tool-Write" || part.type === "tool-Edit") {
       const filePath = part.input?.file_path || ""
       if (isPlanFile(filePath)) {
-        // Edit operations: show "Updating plan..." during streaming, "Updated plan" when done
-        if (part.type === "tool-Edit") {
+        // Use part.toolCallId to find operation since idx may be adjusted for collapsed parts
+        const opIndex = planOpsSummary.operations.findIndex(op => op.part.toolCallId === part.toolCallId)
+        if (opIndex === -1) return null
+
+        const originalIndex = planOpsSummary.operations[opIndex]?.index ?? -1
+        const isInCollapsedSteps = shouldCollapse && collapseBeforeIndex !== -1 && originalIndex < collapseBeforeIndex
+        const isLastCollapsedOp = lastCollapsedPlanOp?.part.toolCallId === part.toolCallId
+        const isLastOperation = opIndex === planOpsSummary.operations.length - 1
+
+        // If this is the last collapsed plan op, hide it here (card shown after CollapsibleSteps)
+        if (isInCollapsedSteps && isLastCollapsedOp) {
+          return null
+        }
+
+        // Show mini indicator for:
+        // - All operations in collapsed steps (except last collapsed, handled above)
+        // - All operations except last in final parts
+        const showMiniIndicator = isInCollapsedSteps || !isLastOperation
+
+        if (showMiniIndicator) {
+          const isWrite = part.type === "tool-Write"
           const { isPending } = getToolStatus(part, status)
-          const isEditStreaming = isPending || (part.state === "input-streaming" && isStreaming && isLastMessage)
+          const isOpStreaming = isPending || (part.state === "input-streaming" && isStreaming && isLastMessage)
+
           return (
             <div key={idx} className="flex items-center gap-1.5 px-2 py-0.5">
+              <PlanIcon className="w-3.5 h-3.5 flex-shrink-0 text-muted-foreground" />
               <span className="text-xs text-muted-foreground">
-                {isEditStreaming ? (
+                {isOpStreaming ? (
                   <TextShimmer as="span" duration={1.2}>
-                    Updating plan...
+                    {isWrite ? "Creating plan..." : "Updating plan..."}
                   </TextShimmer>
                 ) : (
-                  "Updated plan"
+                  isWrite ? "Created plan" : "Updated plan"
                 )}
               </span>
             </div>
           )
         }
-        // Write operations: hide when collapsed (card shown at bottom), show full card otherwise
-        if (shouldCollapse) {
-          return null
-        }
-        return <AgentPlanFileTool key={idx} part={part} chatStatus={status} chatId={chatId} />
+
+        // Last operation in final parts: show full card
+        return (
+          <AgentPlanFileTool
+            key={idx}
+            part={part}
+            chatStatus={status}
+            subChatId={subChatId}
+            isEdit={part.type === "tool-Edit"}
+          />
+        )
       }
     }
 
@@ -495,7 +561,7 @@ export const AssistantMessageItem = memo(function AssistantMessageItem({
     }
 
     return null
-  }, [nestedToolsMap, nestedToolIds, orphanToolCallIds, orphanFirstToolCallIds, orphanTaskGroups, collapseBeforeIndex, visibleStepsCount, status, isLastMessage, isStreaming, subChatId, chatId, message.id, shouldCollapse, lastPlanFilePart])
+  }, [nestedToolsMap, nestedToolIds, orphanToolCallIds, orphanFirstToolCallIds, orphanTaskGroups, collapseBeforeIndex, visibleStepsCount, status, isLastMessage, isStreaming, subChatId, message.id, planOpsSummary, shouldCollapse, lastCollapsedPlanOp])
 
   if (!message) return null
 
@@ -528,15 +594,6 @@ export const AssistantMessageItem = memo(function AssistantMessageItem({
           </CollapsibleSteps>
         )}
 
-        {/* Show plan file card at bottom when collapsed */}
-        {shouldCollapse && lastPlanFilePart && (
-          <AgentPlanFileTool
-            part={lastPlanFilePart.part}
-            chatStatus={status}
-            chatId={chatId}
-          />
-        )}
-
         {(() => {
           const grouped = groupExploringTools(finalParts, nestedToolIds)
           return grouped.map((part: any, idx: number) => {
@@ -555,6 +612,16 @@ export const AssistantMessageItem = memo(function AssistantMessageItem({
             return renderPart(part, shouldCollapse ? collapseBeforeIndex + idx : idx, shouldCollapse)
           })
         })()}
+
+        {/* Show plan card after finalParts if any plan operation was in collapsed steps */}
+        {shouldCollapse && lastCollapsedPlanOp && (
+          <AgentPlanFileTool
+            part={lastCollapsedPlanOp.part}
+            chatStatus={status}
+            subChatId={subChatId}
+            isEdit={lastCollapsedPlanOp.type === "edit"}
+          />
+        )}
 
         {shouldShowPlanning && (
           <AgentToolCall
