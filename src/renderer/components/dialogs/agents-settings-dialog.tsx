@@ -70,8 +70,8 @@ function useIsNarrowScreen(): boolean {
   return isNarrow
 }
 
-// Check if we're in development mode
-const isDevelopment = process.env.NODE_ENV === "development"
+// Check if we're in development mode (use import.meta.env.DEV for Vite)
+const isDevelopment = import.meta.env.DEV
 
 // Clicks required to unlock devtools in production
 const DEVTOOLS_UNLOCK_CLICKS = 5
@@ -307,9 +307,11 @@ export function AgentsSettingsDialog({
   }, [])
 
   const handleTabClick = (tabId: SettingsTab) => {
-    // Handle Beta tab clicks for devtools unlock (only in production builds)
-    if (tabId === "beta" && !isDevelopment && !devToolsUnlocked) {
+    // Handle Beta tab clicks for devtools unlock
+    // Works in both dev and production - the unlock just reveals the Debug tab
+    if (tabId === "beta" && !devToolsUnlocked) {
       betaClickCountRef.current++
+      console.log(`[Settings] Beta click ${betaClickCountRef.current}/${DEVTOOLS_UNLOCK_CLICKS}`)
 
       // Reset counter after 2 seconds of no clicks
       if (betaClickTimeoutRef.current) {

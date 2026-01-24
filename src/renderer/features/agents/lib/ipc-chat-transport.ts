@@ -109,6 +109,7 @@ const ERROR_TOAST_CONFIG: Record<
     title: "Authentication failed",
     description: "Your session may have expired. Try logging in again.",
   },
+  // SDK_ERROR is handled dynamically below to include full error details in copy
 }
 
 type UIMessageChunk = any // Inferred from subscription
@@ -312,8 +313,23 @@ export class IPCChatTransport implements ChatTransport<UIMessage> {
 
               // Handle errors - show toast to user FIRST before anything else
               if (chunk.type === "error") {
-                // Track error in Sentry
                 const category = chunk.debugInfo?.category || "UNKNOWN"
+
+                // Detailed SDK error logging for debugging
+                console.error(`[SDK ERROR] ========================================`)
+                console.error(`[SDK ERROR] Category: ${category}`)
+                console.error(`[SDK ERROR] Error text: ${chunk.errorText}`)
+                console.error(`[SDK ERROR] Chat ID: ${this.config.chatId}`)
+                console.error(`[SDK ERROR] SubChat ID: ${this.config.subChatId}`)
+                console.error(`[SDK ERROR] CWD: ${this.config.cwd}`)
+                console.error(`[SDK ERROR] Mode: ${currentMode}`)
+                if (chunk.debugInfo) {
+                  console.error(`[SDK ERROR] Debug info:`, JSON.stringify(chunk.debugInfo, null, 2))
+                }
+                console.error(`[SDK ERROR] Full chunk:`, JSON.stringify(chunk, null, 2))
+                console.error(`[SDK ERROR] ========================================`)
+
+                // Track error in Sentry
                 Sentry.captureException(
                   new Error(chunk.errorText || "Claude transport error"),
                   {
@@ -330,27 +346,34 @@ export class IPCChatTransport implements ChatTransport<UIMessage> {
                   },
                 )
 
+                // Build detailed error string for copying (available for ALL errors)
+                const errorDetails = [
+                  `Error: ${chunk.errorText || "Unknown error"}`,
+                  `Category: ${category}`,
+                  `Chat ID: ${this.config.chatId}`,
+                  `SubChat ID: ${this.config.subChatId}`,
+                  `CWD: ${this.config.cwd}`,
+                  `Mode: ${currentMode}`,
+                  `Timestamp: ${new Date().toISOString()}`,
+                  chunk.debugInfo ? `Debug Info: ${JSON.stringify(chunk.debugInfo, null, 2)}` : null,
+                ].filter(Boolean).join("\n")
+
                 // Show toast based on error category
                 const config = ERROR_TOAST_CONFIG[category]
+                const title = config?.title || "Claude error"
+                const description = config?.description || chunk.errorText || "An unexpected error occurred"
 
-                if (config) {
-                  toast.error(config.title, {
-                    description: config.description,
-                    duration: 8000,
-                    action: config.action
-                      ? {
-                          label: config.action.label,
-                          onClick: config.action.onClick,
-                        }
-                      : undefined,
-                  })
-                } else {
-                  toast.error("Something went wrong", {
-                    description:
-                      chunk.errorText || "An unexpected error occurred",
-                    duration: 8000,
-                  })
-                }
+                toast.error(title, {
+                  description,
+                  duration: 12000,
+                  action: {
+                    label: "Copy Error",
+                    onClick: () => {
+                      navigator.clipboard.writeText(errorDetails)
+                      toast.success("Error details copied to clipboard")
+                    },
+                  },
+                })
               }
 
               // Try to enqueue, but don't crash if stream is already closed

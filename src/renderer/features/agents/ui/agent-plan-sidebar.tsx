@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo } from "react"
+import { useEffect, useMemo } from "react"
 import { useAtomValue } from "jotai"
 import { Button } from "../../../components/ui/button"
 import { IconCloseSidebarRight, IconSpinner, PlanIcon } from "../../../components/ui/icons"
@@ -14,6 +14,8 @@ interface AgentPlanSidebarProps {
   planPath: string | null
   onClose: () => void
   onBuildPlan?: () => void
+  /** Timestamp that triggers refetch when changed (e.g., after plan Edit completes) */
+  refetchTrigger?: number
 }
 
 export function AgentPlanSidebar({
@@ -21,14 +23,22 @@ export function AgentPlanSidebar({
   planPath,
   onClose,
   onBuildPlan,
+  refetchTrigger,
 }: AgentPlanSidebarProps) {
   const isPlanMode = useAtomValue(isPlanModeAtom)
 
   // Fetch plan file content using tRPC
-  const { data: planContent, isLoading, error } = trpc.files.readFile.useQuery(
+  const { data: planContent, isLoading, error, refetch } = trpc.files.readFile.useQuery(
     { filePath: planPath! },
     { enabled: !!planPath }
   )
+
+  // Refetch when trigger changes
+  useEffect(() => {
+    if (refetchTrigger && planPath) {
+      refetch()
+    }
+  }, [refetchTrigger, planPath, refetch])
 
   // Extract plan title from markdown (first H1)
   const planTitle = useMemo(() => {
@@ -46,16 +56,15 @@ export function AgentPlanSidebar({
           <span className="text-sm font-medium truncate">{planTitle}</span>
         </div>
         <div className="flex items-center gap-1 flex-shrink-0">
-          {/* Build Plan button - only show in plan mode */}
+          {/* Approve Plan button - only show in plan mode */}
           {isPlanMode && onBuildPlan && (
             <Button
-              variant="secondary"
               size="sm"
               className="h-6 px-3 text-xs font-medium rounded-md transition-transform duration-150 active:scale-[0.97]"
               onClick={onBuildPlan}
             >
-              Build plan
-              <Kbd className="ml-1">⌘↵</Kbd>
+              Approve
+              <Kbd className="ml-1.5 text-primary-foreground/70">⌘↵</Kbd>
             </Button>
           )}
           <Button

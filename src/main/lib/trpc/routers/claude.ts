@@ -1190,6 +1190,10 @@ ${prompt}
             let lastAssistantUuid: string | null = null
             const streamIterationStart = Date.now()
 
+            // Plan mode: track ExitPlanMode to stop after plan is complete
+            let planCompleted = false
+            let exitPlanModeToolCallId: string | null = null
+
             if (isUsingOllama) {
               console.log(`[Ollama] ===== STARTING STREAM ITERATION =====`)
               console.log(`[Ollama] Model: ${finalCustomConfig?.model}`)
@@ -1248,6 +1252,23 @@ ${prompt}
                   const sdkError =
                     msgAny.error || msgAny.message || "Unknown SDK error"
                   lastError = new Error(sdkError)
+
+                  // Detailed SDK error logging in main process
+                  console.error(`[CLAUDE SDK ERROR] ========================================`)
+                  console.error(`[CLAUDE SDK ERROR] Raw error: ${sdkError}`)
+                  console.error(`[CLAUDE SDK ERROR] Message type: ${msgAny.type}`)
+                  console.error(`[CLAUDE SDK ERROR] SubChat ID: ${input.subChatId}`)
+                  console.error(`[CLAUDE SDK ERROR] Chat ID: ${input.chatId}`)
+                  console.error(`[CLAUDE SDK ERROR] CWD: ${input.cwd}`)
+                  console.error(`[CLAUDE SDK ERROR] Mode: ${input.mode}`)
+                  console.error(`[CLAUDE SDK ERROR] Session ID: ${msgAny.session_id || 'none'}`)
+                  console.error(`[CLAUDE SDK ERROR] Has custom config: ${!!finalCustomConfig}`)
+                  console.error(`[CLAUDE SDK ERROR] Is using Ollama: ${isUsingOllama}`)
+                  console.error(`[CLAUDE SDK ERROR] Model: ${resolvedModel || 'default'}`)
+                  console.error(`[CLAUDE SDK ERROR] Has OAuth token: ${!!claudeCodeToken}`)
+                  console.error(`[CLAUDE SDK ERROR] MCP servers: ${mcpServersFiltered ? Object.keys(mcpServersFiltered).join(', ') : 'none'}`)
+                  console.error(`[CLAUDE SDK ERROR] Full message:`, JSON.stringify(msgAny, null, 2))
+                  console.error(`[CLAUDE SDK ERROR] ========================================`)
 
                   // Categorize SDK-level errors
                   let errorCategory = "SDK_ERROR"
@@ -1381,6 +1402,12 @@ ${prompt}
                       // DEBUG: Log tool calls
                       console.log(`[SD] M:TOOL_CALL sub=${subId} toolName="${chunk.toolName}" mode=${input.mode} callId=${chunk.toolCallId}`)
 
+                      // Track ExitPlanMode toolCallId so we can stop when it completes
+                      if (input.mode === "plan" && chunk.toolName === "ExitPlanMode") {
+                        console.log(`[SD] M:PLAN_TOOL_DETECTED sub=${subId} callId=${chunk.toolCallId}`)
+                        exitPlanModeToolCallId = chunk.toolCallId
+                      }
+
                       parts.push({
                         type: `tool-${chunk.toolName}`,
                         toolCallId: chunk.toolCallId,
@@ -1415,6 +1442,13 @@ ${prompt}
                             }
                           }
                         }
+
+                        // Check if ExitPlanMode just completed - stop the stream
+                        if (exitPlanModeToolCallId && chunk.toolCallId === exitPlanModeToolCallId) {
+                          console.log(`[SD] M:PLAN_FINISH sub=${subId} - ExitPlanMode completed, emitting finish`)
+                          planCompleted = true
+                          safeEmit({ type: "finish" } as UIMessageChunk)
+                        }
                       }
                       break
                     case "message-metadata":
@@ -1437,10 +1471,21 @@ ${prompt}
                       }
                       break
                   }
+
+                  // Break from chunk loop if plan is done
+                  if (planCompleted) {
+                    console.log(`[SD] M:PLAN_BREAK_CHUNK sub=${subId}`)
+                    break
+                  }
                 }
                 // Break from stream loop if observer closed (user clicked Stop)
                 if (!isObservableActive) {
                   console.log(`[SD] M:OBSERVER_CLOSED_STREAM sub=${subId}`)
+                  break
+                }
+                // Break from stream loop if plan completed
+                if (planCompleted) {
+                  console.log(`[SD] M:PLAN_BREAK_STREAM sub=${subId}`)
                   break
                 }
               }

@@ -690,3 +690,18 @@ export const currentPlanPathAtomFamily = atomFamily((chatId: string) =>
     },
   ),
 )
+
+// Per-chat plan edit refetch trigger - incremented when an Edit on a plan file completes
+// Used to trigger sidebar refetch when plan content changes
+const planEditRefetchTriggerStorageAtom = atom<Record<string, number>>({})
+
+export const planEditRefetchTriggerAtomFamily = atomFamily((chatId: string) =>
+  atom(
+    (get) => get(planEditRefetchTriggerStorageAtom)[chatId] ?? 0,
+    (get, set) => {
+      const current = get(planEditRefetchTriggerStorageAtom)
+      const currentValue = current[chatId] ?? 0
+      set(planEditRefetchTriggerStorageAtom, { ...current, [chatId]: currentValue + 1 })
+    },
+  ),
+)

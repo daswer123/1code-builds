@@ -52,10 +52,17 @@ export async function initAutoUpdater(getWindow: () => BrowserWindow | null) {
   initAutoUpdaterConfig()
 
   // Configure feed URL to point to R2 CDN
+  // Note: We use a custom request headers to bypass CDN cache
   autoUpdater.setFeedURL({
     provider: "generic",
     url: CDN_BASE,
   })
+
+  // Add cache-busting to update requests
+  autoUpdater.requestHeaders = {
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
+  }
 
   // Event: Checking for updates
   autoUpdater.on("checking-for-update", () => {

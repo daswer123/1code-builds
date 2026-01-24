@@ -4,14 +4,14 @@ import { useAtomValue } from "jotai"
 import { ListTree } from "lucide-react"
 import { memo, useCallback, useMemo, useState } from "react"
 
-import { CollapseIcon, ExpandIcon, IconTextUndo } from "../../../components/ui/icons"
+import { CollapseIcon, ExpandIcon, IconTextUndo, PlanIcon } from "../../../components/ui/icons"
+import { TextShimmer } from "../../../components/ui/text-shimmer"
 import { cn } from "../../../lib/utils"
 import { isRollingBackAtom, rollbackHandlerAtom } from "../stores/message-store"
 import { AgentAskUserQuestionTool } from "../ui/agent-ask-user-question-tool"
 import { AgentBashTool } from "../ui/agent-bash-tool"
 import { AgentEditTool } from "../ui/agent-edit-tool"
 import { AgentExploringGroup } from "../ui/agent-exploring-group"
-import { AgentPlanCompactCard } from "../ui/agent-plan-compact-card"
 import { AgentPlanFileTool } from "../ui/agent-plan-file-tool"
 import { isPlanFile } from "../ui/agent-tool-utils"
 import {
@@ -142,11 +142,11 @@ export interface AssistantMessageItemProps {
 }
 
 // Cache for tracking previous message state per message (to detect AI SDK in-place mutations)
-// Stores both text lengths and tool input JSON strings for complete change detection
+// Stores both text lengths and tool states for complete change detection
 interface MessageStateSnapshot {
   textLengths: number[]
+  partStates: (string | undefined)[]
   lastPartInputJson: string | undefined
-  lastPartState: string | undefined
 }
 const messageStateCache = new Map<string, MessageStateSnapshot>()
 
@@ -182,9 +182,10 @@ function areMessagePropsEqual(
     textLengths: nextParts.map((p: any) =>
       p.type === "text" ? (p.text?.length || 0) : -1
     ),
+    // Track ALL part states - critical for detecting Edit plan file streaming!
+    partStates: nextParts.map((p: any) => p.state),
     // Track tool input changes - this is critical for tool streaming!
     lastPartInputJson: lastPart?.input ? JSON.stringify(lastPart.input) : undefined,
-    lastPartState: lastPart?.state,
   }
 
   // Get cached state from previous render
@@ -216,10 +217,12 @@ function areMessagePropsEqual(
     return false  // Tool input changed
   }
 
-  // Compare last part's state
-  if (cachedState.lastPartState !== currentState.lastPartState) {
-    messageStateCache.set(msgId!, currentState)
-    return false  // Part state changed
+  // Compare ALL part states (detects Edit plan file streaming!)
+  for (let i = 0; i < currentState.partStates.length; i++) {
+    if (cachedState.partStates[i] !== currentState.partStates[i]) {
+      messageStateCache.set(msgId!, currentState)
+      return false  // Part state changed
+    }
   }
 
   // Nothing changed - skip re-render
@@ -288,26 +291,26 @@ export const AssistantMessageItem = memo(function AssistantMessageItem({
     return { nestedToolsMap, nestedToolIds, orphanTaskGroups, orphanToolCallIds, orphanFirstToolCallIds }
   }, [messageParts])
 
-  // Find plan file part FIRST (needed for collapsing logic)
-  const { planFilePart, planFileIndex } = useMemo(() => {
-    if (isStreaming && isLastMessage) return { planFilePart: null, planFileIndex: -1 }
+  // Find last plan file Write part for showing card in collapsed view (Edit doesn't show card)
+  const lastPlanFilePart = useMemo(() => {
     for (let i = messageParts.length - 1; i >= 0; i--) {
       const part = messageParts[i]
-      if ((part.type === "tool-Write" || part.type === "tool-Edit") && isPlanFile(part.input?.file_path || "")) {
-        return { planFilePart: part, planFileIndex: i }
+      if (part.type === "tool-Write" && isPlanFile(part.input?.file_path || "")) {
+        return { part, index: i }
       }
     }
-    return { planFilePart: null, planFileIndex: -1 }
-  }, [messageParts, isStreaming, isLastMessage])
+    return null
+  }, [messageParts])
 
-  // Collapsing logic: collapse if final text OR plan file exists
+  // Collapsing logic: collapse only if final text exists after tools
   const { shouldCollapse, visibleStepsCount, collapseBeforeIndex } = useMemo(() => {
     let lastToolIndex = -1
     let lastTextIndex = -1
 
     for (let i = 0; i < messageParts.length; i++) {
       const part = messageParts[i]
-      if (part.type?.startsWith("tool-")) {
+      // Ignore ExitPlanMode - it's not a real tool for the user
+      if (part.type?.startsWith("tool-") && part.type !== "tool-ExitPlanMode") {
         lastToolIndex = i
       }
       if (part.type === "text" && part.text?.trim()) {
@@ -319,12 +322,9 @@ export const AssistantMessageItem = memo(function AssistantMessageItem({
     const finalTextIndex = hasToolsAndFinalText ? lastTextIndex : -1
     const hasFinalText = finalTextIndex !== -1 && (!isStreaming || !isLastMessage)
 
-    // Also collapse if we have a plan file (even without final text after it)
-    const hasPlanToCollapse = planFileIndex !== -1 && (!isStreaming || !isLastMessage)
-    const shouldCollapse = hasFinalText || hasPlanToCollapse
-
-    // Where to collapse: before final text (priority) OR before plan file
-    const collapseBeforeIndex = hasFinalText ? finalTextIndex : (hasPlanToCollapse ? planFileIndex : -1)
+    // Collapse only when there's final text after tools
+    const shouldCollapse = hasFinalText
+    const collapseBeforeIndex = hasFinalText ? finalTextIndex : -1
 
     // Calculate visible steps count for collapsible header
     const stepParts = shouldCollapse && collapseBeforeIndex !== -1 ? messageParts.slice(0, collapseBeforeIndex) : []
@@ -339,7 +339,7 @@ export const AssistantMessageItem = memo(function AssistantMessageItem({
     }).length
 
     return { shouldCollapse, visibleStepsCount, collapseBeforeIndex }
-  }, [messageParts, isStreaming, isLastMessage, nestedToolIds, orphanToolCallIds, orphanFirstToolCallIds, planFileIndex])
+  }, [messageParts, isStreaming, isLastMessage, nestedToolIds, orphanToolCallIds, orphanFirstToolCallIds])
 
   const stepParts = useMemo(() => {
     if (!shouldCollapse || collapseBeforeIndex === -1) return []
@@ -410,15 +410,32 @@ export const AssistantMessageItem = memo(function AssistantMessageItem({
     if (part.type === "tool-Bash") return <AgentBashTool key={idx} part={part} messageId={message.id} partIndex={idx} chatStatus={status} />
     if (part.type === "tool-Thinking") return <AgentThinkingTool key={idx} part={part} chatStatus={status} />
 
-    // Plan files: show inline during streaming, skip if planFilePart (shown as compact card at bottom)
-    if (part.type === "tool-Edit" || part.type === "tool-Write") {
+    // Plan files: Write shows full Plan card, Edit shows "Updating plan..." / "Updated plan"
+    if (part.type === "tool-Write" || part.type === "tool-Edit") {
       const filePath = part.input?.file_path || ""
       if (isPlanFile(filePath)) {
-        // If this is the plan file part and we have planFilePart, skip (shown at bottom)
-        if (planFilePart && part === planFilePart) {
+        // Edit operations: show "Updating plan..." during streaming, "Updated plan" when done
+        if (part.type === "tool-Edit") {
+          const { isPending } = getToolStatus(part, status)
+          const isEditStreaming = isPending || (part.state === "input-streaming" && isStreaming && isLastMessage)
+          return (
+            <div key={idx} className="flex items-center gap-1.5 px-2 py-0.5">
+              <span className="text-xs text-muted-foreground">
+                {isEditStreaming ? (
+                  <TextShimmer as="span" duration={1.2}>
+                    Updating plan...
+                  </TextShimmer>
+                ) : (
+                  "Updated plan"
+                )}
+              </span>
+            </div>
+          )
+        }
+        // Write operations: hide when collapsed (card shown at bottom), show full card otherwise
+        if (shouldCollapse) {
           return null
         }
-        // During streaming, show plan inline
         return <AgentPlanFileTool key={idx} part={part} chatStatus={status} chatId={chatId} />
       }
     }
@@ -478,7 +495,7 @@ export const AssistantMessageItem = memo(function AssistantMessageItem({
     }
 
     return null
-  }, [nestedToolsMap, nestedToolIds, orphanToolCallIds, orphanFirstToolCallIds, orphanTaskGroups, collapseBeforeIndex, visibleStepsCount, status, isLastMessage, isStreaming, subChatId, chatId, message.id, planFilePart])
+  }, [nestedToolsMap, nestedToolIds, orphanToolCallIds, orphanFirstToolCallIds, orphanTaskGroups, collapseBeforeIndex, visibleStepsCount, status, isLastMessage, isStreaming, subChatId, chatId, message.id, shouldCollapse, lastPlanFilePart])
 
   if (!message) return null
 
@@ -511,6 +528,15 @@ export const AssistantMessageItem = memo(function AssistantMessageItem({
           </CollapsibleSteps>
         )}
 
+        {/* Show plan file card at bottom when collapsed */}
+        {shouldCollapse && lastPlanFilePart && (
+          <AgentPlanFileTool
+            part={lastPlanFilePart.part}
+            chatStatus={status}
+            chatId={chatId}
+          />
+        )}
+
         {(() => {
           const grouped = groupExploringTools(finalParts, nestedToolIds)
           return grouped.map((part: any, idx: number) => {
@@ -539,10 +565,6 @@ export const AssistantMessageItem = memo(function AssistantMessageItem({
           />
         )}
 
-        {/* Show plan compact card at the bottom when there's a completed plan */}
-        {planFilePart && (
-          <AgentPlanCompactCard part={planFilePart} chatId={chatId} />
-        )}
       </div>
 
       {hasTextContent && (!isStreaming || !isLastMessage) && (

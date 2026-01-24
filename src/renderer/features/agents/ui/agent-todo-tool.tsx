@@ -324,10 +324,13 @@ export const AgentTodoTool = memo(function AgentTodoTool({
   const syncedTodos = todoState.todos
   const creationToolCallId = todoState.creationToolCallId
 
-  // Use ref to track syncedTodos without triggering effect re-runs
+  // Use refs to track values without triggering effect re-runs
   // This prevents infinite loops when the effect updates the atom
   const syncedTodosRef = useRef(syncedTodos)
   syncedTodosRef.current = syncedTodos
+
+  const creationToolCallIdRef = useRef(creationToolCallId)
+  creationToolCallIdRef.current = creationToolCallId
 
   // Get todos from input or output.newTodos
   const rawOldTodos = part.output?.oldTodos || []
@@ -419,18 +422,38 @@ export const AgentTodoTool = memo(function AgentTodoTool({
   // This keeps the creation tool in sync with all updates
   useEffect(() => {
     if (newTodos.length > 0) {
-      // Use ref to get current syncedTodos without adding it to dependencies
-      // This prevents infinite loops: effect updates atom -> syncedTodos changes -> effect runs again
+      // Use refs to get current values without adding them to dependencies
+      // This prevents infinite loops: effect updates atom -> state changes -> effect runs again
       const currentSyncedTodos = syncedTodosRef.current
+      const currentCreationToolCallId = creationToolCallIdRef.current
+
+      // Compute these inside the effect to avoid dependency issues
+      // These values depend on syncedTodos/creationToolCallId which change when we call setTodoState
+      const hasOutputWithEmptyOldTodos = part.output !== undefined &&
+        'oldTodos' in part.output &&
+        Array.isArray(part.output.oldTodos) &&
+        part.output.oldTodos.length === 0
+
+      const isNewGenerationLocal = hasOutputWithEmptyOldTodos &&
+        newTodos.length > 0 &&
+        currentSyncedTodos.length > 0 &&
+        currentCreationToolCallId !== null &&
+        currentCreationToolCallId !== part.toolCallId
+
+      const isCreationToolCallLocal = currentCreationToolCallId === null ||
+        currentCreationToolCallId === part.toolCallId ||
+        isNewGenerationLocal
 
       // Only update if:
       // 1. This is the creation tool call (always update), OR
       // 2. newTodos has at least as many items as syncedTodos (prevents partial streaming overwrites)
       // During streaming, JSON parsing may return partial arrays, causing temporary drops in length
-      const shouldUpdate = isCreationToolCall || newTodos.length >= currentSyncedTodos.length
+      const shouldUpdate = isCreationToolCallLocal || newTodos.length >= currentSyncedTodos.length
 
       // If this is a new generation, reset the creationToolCallId to this tool call
-      const newCreationId = isNewGeneration ? part.toolCallId : (creationToolCallId === null ? part.toolCallId : creationToolCallId)
+      const newCreationId = isNewGenerationLocal
+        ? part.toolCallId
+        : (currentCreationToolCallId === null ? part.toolCallId : currentCreationToolCallId)
 
       if (shouldUpdate) {
         // Prevent infinite loop: check if todos actually changed before updating
@@ -438,12 +461,12 @@ export const AgentTodoTool = memo(function AgentTodoTool({
         const newTodosJson = JSON.stringify(newTodos)
         const syncedTodosJson = JSON.stringify(currentSyncedTodos)
 
-        if (newTodosJson !== syncedTodosJson) {
+        if (newTodosJson !== syncedTodosJson || currentCreationToolCallId !== newCreationId) {
           setTodoState({ todos: newTodos, creationToolCallId: newCreationId })
         }
       }
     }
-  }, [newTodos, setTodoState, creationToolCallId, part.toolCallId, isCreationToolCall, isNewGeneration])
+  }, [newTodos, setTodoState, part.toolCallId, part.output])
 
   // For UPDATE tool calls while streaming, show "Updating..." placeholder
   // This check MUST come BEFORE the newTodos.length === 0 check

@@ -106,6 +106,7 @@ import {
   pendingConflictResolutionMessageAtom,
   pendingBuildPlanSubChatIdAtom,
   pendingPlanApprovalsAtom,
+  planEditRefetchTriggerAtomFamily,
   pendingPrMessageAtom,
   pendingReviewMessageAtom,
   pendingUserQuestionsAtom,
@@ -171,6 +172,7 @@ import { AgentPreview } from "../ui/agent-preview"
 import { AgentQueueIndicator } from "../ui/agent-queue-indicator"
 import { AgentToolCall } from "../ui/agent-tool-call"
 import { AgentToolRegistry } from "../ui/agent-tool-registry"
+import { isPlanFile } from "../ui/agent-tool-utils"
 import { AgentUserMessageBubble } from "../ui/agent-user-message-bubble"
 import { AgentUserQuestion, type AgentUserQuestionHandle } from "../ui/agent-user-question"
 import { AgentsHeaderControls } from "../ui/agents-header-controls"
@@ -1922,14 +1924,17 @@ const ChatViewInner = memo(function ChatViewInner({
     prevScrollTopRef.current = currentScrollTop
 
     // Ignore scroll events during initialization (content loading)
-    if (isAutoScrollingRef.current || isInitializingScrollRef.current) return
+    if (isInitializingScrollRef.current) return
 
     // If user scrolls UP - disable auto-scroll immediately
-    // BUT keep large padding (user wants to keep the clean slate UX)
+    // This works even during auto-scroll animation (user intent takes priority)
     if (currentScrollTop < prevScrollTop) {
       shouldAutoScrollRef.current = false
       return
     }
+
+    // Ignore other scroll direction checks during auto-scroll animation
+    if (isAutoScrollingRef.current) return
 
     // If user scrolls DOWN and reaches bottom - enable auto-scroll
     shouldAutoScrollRef.current = isAtBottom()
@@ -2077,10 +2082,31 @@ const ChatViewInner = memo(function ChatViewInner({
   // Caches are only cleared on unmount (when tab is evicted from keep-alive pool).
 
   // Cleanup message caches on unmount (when tab is evicted from keep-alive)
+  // CRITICAL: Use a delayed cleanup to avoid clearing caches during temporary unmount/remount
+  // (e.g., React StrictMode, HMR, or parent re-render causing component remount)
   useEffect(() => {
     const currentSubChatId = subChatId
     return () => {
-      clearSubChatCaches(currentSubChatId)
+      // Delay cache clearing to allow remount to happen first
+      // If the component remounts with the same subChatId, the sync will repopulate the atoms
+      // If it truly unmounts, the timeout will clear the caches
+      const timeoutId = setTimeout(() => {
+        clearSubChatCaches(currentSubChatId)
+      }, 100)
+
+      // Store the timeout so it can be cancelled if the component remounts
+      // We use a global map to track pending cleanups
+      ;(window as any).__pendingCacheCleanups = (window as any).__pendingCacheCleanups || new Map()
+      ;(window as any).__pendingCacheCleanups.set(currentSubChatId, timeoutId)
+    }
+  }, [subChatId])
+
+  // Cancel pending cleanup if we remount with the same subChatId
+  useEffect(() => {
+    const pendingCleanups = (window as any).__pendingCacheCleanups as Map<string, number> | undefined
+    if (pendingCleanups?.has(subChatId)) {
+      clearTimeout(pendingCleanups.get(subChatId))
+      pendingCleanups.delete(subChatId)
     }
   }, [subChatId])
 
@@ -2831,6 +2857,37 @@ const ChatViewInner = memo(function ChatViewInner({
       }
     }
   }, [messages, isStreaming, parentChatId])
+
+  // Track plan Edit completions to trigger sidebar refetch
+  const triggerPlanEditRefetch = useSetAtom(
+    useMemo(() => planEditRefetchTriggerAtomFamily(parentChatId), [parentChatId])
+  )
+  const lastPlanEditCountRef = useRef(0)
+
+  useEffect(() => {
+    // Count completed plan Edits
+    let completedPlanEdits = 0
+    for (const msg of messages) {
+      if (msg.role !== "assistant" || !(msg as any).parts) continue
+      for (const part of (msg as any).parts as any[]) {
+        if (
+          part.type === "tool-Edit" &&
+          part.state !== "input-streaming" &&
+          part.state !== "pending" &&
+          isPlanFile(part.input?.file_path || "")
+        ) {
+          completedPlanEdits++
+        }
+      }
+    }
+
+    // Trigger refetch if count increased (new Edit completed)
+    if (completedPlanEdits > lastPlanEditCountRef.current) {
+      lastPlanEditCountRef.current = completedPlanEdits
+      triggerPlanEditRefetch()
+    }
+  }, [messages, triggerPlanEditRefetch])
+
   const { changedFiles: changedFilesForSubChat, recomputeChangedFiles } = useChangedFilesTracking(
     messages,
     subChatId,
@@ -3554,12 +3611,13 @@ const ChatViewInner = memo(function ChatViewInner({
         }
       }
 
-      // If assistant message with ExitPlanMode, we found an unapproved plan
-      if (msg.role === "assistant") {
-        const exitPlanPart = msg.parts?.find(
-          (p: any) => p.type === "tool-ExitPlanMode",
+      // If assistant message with completed ExitPlanMode, we found an unapproved plan
+      if (msg.role === "assistant" && msg.parts) {
+        const exitPlanPart = msg.parts.find(
+          (p: any) => p.type === "tool-ExitPlanMode"
         )
-        if (exitPlanPart?.output?.plan) {
+        // Check if ExitPlanMode is completed (has output, even if empty)
+        if (exitPlanPart && exitPlanPart.output !== undefined) {
           return true
         }
       }
@@ -3989,6 +4047,13 @@ export function ChatView({
   )
   const [currentPlanPath, setCurrentPlanPath] = useAtom(currentPlanPathAtom)
   const setPendingBuildPlanSubChatId = useSetAtom(pendingBuildPlanSubChatIdAtom)
+
+  // Read plan edit refetch trigger from atom (set by ChatViewInner when Edit completes)
+  const planEditRefetchTriggerAtom = useMemo(
+    () => planEditRefetchTriggerAtomFamily(chatId),
+    [chatId],
+  )
+  const planEditRefetchTrigger = useAtomValue(planEditRefetchTriggerAtom)
 
   // Handler for plan sidebar "Build plan" button
   // Uses getState() to get fresh activeSubChatId (avoids stale closure)
@@ -5999,6 +6064,7 @@ Make sure to preserve all functionality from both branches when resolving confli
               planPath={currentPlanPath}
               onClose={() => setIsPlanSidebarOpen(false)}
               onBuildPlan={handleApprovePlanFromSidebar}
+              refetchTrigger={planEditRefetchTrigger}
             />
           </ResizableSidebar>
         )}

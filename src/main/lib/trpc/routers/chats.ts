@@ -1521,7 +1521,7 @@ export const chatsRouter = router({
 
   /**
    * Get sub-chats with pending plan approvals
-   * Parses messages to find ExitPlanMode tool calls without subsequent "Implement plan" user message
+   * Parses messages to find plan file Write without subsequent "Implement plan" user message
    * Logic must match active-chat.tsx hasUnapprovedPlan
    * REQUIRES openSubChatIds to avoid loading all sub-chats (performance optimization)
    */
@@ -1558,6 +1558,7 @@ export const chatsRouter = router({
           parts?: Array<{
             type: string
             text?: string
+            output?: unknown
           }>
         }>
 
@@ -1578,10 +1579,13 @@ export const chatsRouter = router({
               }
             }
 
-            // If assistant message with ExitPlanMode that has output.plan, we found an unapproved plan
+            // If assistant message with completed ExitPlanMode, we found an unapproved plan
             if (msg.role === "assistant" && msg.parts) {
-              const exitPlanPart = msg.parts.find((p) => p.type === "tool-ExitPlanMode") as { output?: { plan?: string } } | undefined
-              if (exitPlanPart?.output?.plan) {
+              const exitPlanPart = msg.parts.find(
+                (p) => p.type === "tool-ExitPlanMode"
+              )
+              // Check if ExitPlanMode is completed (has output, even if empty)
+              if (exitPlanPart && exitPlanPart.output !== undefined) {
                 return true
               }
             }
