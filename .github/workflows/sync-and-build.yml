@@ -1,0 +1,252 @@
+name: Sync Upstream & Build
+
+on:
+  # Проверять каждые 6 часов
+  schedule:
+    - cron: '0 */6 * * *'
+
+  # Ручной запуск
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force build even if no new release'
+        type: boolean
+        default: false
+
+env:
+  UPSTREAM_REPO: 21st-dev/1code
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      upstream_version: ${{ steps.check.outputs.upstream_version }}
+      release_tag: ${{ steps.check.outputs.release_tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for new upstream release
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Получаем последний релиз upstream
+          UPSTREAM_RELEASE=$(gh api repos/${{ env.UPSTREAM_REPO }}/releases/latest --jq '.tag_name' 2>/dev/null || echo "")
+
+          if [ -z "$UPSTREAM_RELEASE" ]; then
+            echo "No upstream release found"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Upstream latest release: $UPSTREAM_RELEASE"
+
+          # Проверяем есть ли уже такой тег у нас
+          if git tag -l | grep -q "^${UPSTREAM_RELEASE}$"; then
+            echo "Tag $UPSTREAM_RELEASE already exists locally"
+            if [ "${{ inputs.force_build }}" == "true" ]; then
+              echo "Force build requested"
+              echo "should_build=true" >> $GITHUB_OUTPUT
+            else
+              echo "should_build=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "New release found: $UPSTREAM_RELEASE"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          fi
+
+          # Извлекаем версию из тега (убираем 'v' если есть)
+          VERSION=${UPSTREAM_RELEASE#v}
+          echo "upstream_version=$VERSION" >> $GITHUB_OUTPUT
+          echo "release_tag=$UPSTREAM_RELEASE" >> $GITHUB_OUTPUT
+
+  sync-upstream:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git || true
+          git fetch upstream --tags
+
+      - name: Merge upstream changes
+        run: |
+          # Мержим изменения из upstream main
+          git merge upstream/main --no-edit --allow-unrelated-histories || {
+            echo "Merge conflict detected, please resolve manually"
+            exit 1
+          }
+
+      - name: Push changes
+        run: |
+          git push origin main
+          git push origin --tags
+
+  build-windows:
+    needs: [check-upstream, sync-upstream]
+    if: needs.check-upstream.outputs.should_build == 'true'
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Download Claude binary
+        run: bun run claude:download
+        continue-on-error: true
+
+      - name: Build
+        run: bun run build
+
+      - name: Package for Windows
+        run: bun run package:win
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: |
+            release/*.exe
+            release/*.zip
+          retention-days: 5
+
+  build-macos:
+    needs: [check-upstream, sync-upstream]
+    if: needs.check-upstream.outputs.should_build == 'true'
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Download Claude binary
+        run: bun run claude:download
+        continue-on-error: true
+
+      - name: Build
+        run: bun run build
+
+      - name: Package for macOS
+        run: bun run package:mac
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Для подписи добавь эти секреты:
+          # CSC_LINK: ${{ secrets.MAC_CERTIFICATE }}
+          # CSC_KEY_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-build
+          path: |
+            release/*.dmg
+            release/*.zip
+          retention-days: 5
+
+  create-release:
+    needs: [check-upstream, build-windows, build-macos]
+    if: needs.check-upstream.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-build
+          path: ./artifacts/windows
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-build
+          path: ./artifacts/macos
+
+      - name: List artifacts
+        run: |
+          echo "=== Windows ==="
+          ls -la ./artifacts/windows/ || echo "No Windows artifacts"
+          echo "=== macOS ==="
+          ls -la ./artifacts/macos/ || echo "No macOS artifacts"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.check-upstream.outputs.release_tag }}
+          name: "Release ${{ needs.check-upstream.outputs.release_tag }}"
+          body: |
+            ## Auto-synced from upstream
+
+            This release was automatically built from [21st-dev/1code](https://github.com/21st-dev/1code) release `${{ needs.check-upstream.outputs.release_tag }}`.
+
+            ### Downloads
+            - **Windows**: `.exe` installer
+            - **macOS**: `.dmg` installer
+
+            > Note: macOS builds are unsigned. You may need to right-click and select "Open" on first launch.
+          files: |
+            ./artifacts/windows/*
+            ./artifacts/macos/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
