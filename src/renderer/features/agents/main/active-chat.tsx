@@ -2497,6 +2497,31 @@ const ChatViewInner = memo(function ChatViewInner({
     return () => window.removeEventListener("file-viewer-add-to-context", handler)
   }, [addTextContext])
 
+  // Listen for file-tree "Add to Chat Context" — inserts file mention chip
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as {
+        id: string
+        label: string
+        path: string
+        repository: string
+        type: string
+      }
+      if (detail.id && detail.label) {
+        editorRef.current?.insertMention({
+          id: detail.id,
+          label: detail.label,
+          path: detail.path,
+          repository: detail.repository,
+          type: detail.type as "file" | "folder",
+        })
+        editorRef.current?.focus()
+      }
+    }
+    window.addEventListener("file-tree-mention", handler)
+    return () => window.removeEventListener("file-tree-mention", handler)
+  }, [])
+
   // Handler for quick comment trigger from popover
   const handleQuickComment = useCallback((text: string, source: TextSelectionSource, rect: DOMRect) => {
     setQuickCommentState({ selectedText: text, source, rect })
@@ -7835,6 +7860,7 @@ Make sure to preserve all functionality from both branches when resolving confli
               // Open the diff sidebar
               setIsDiffSidebarOpen(true)
             }}
+            onOpenFile={setFileViewerPath}
             remoteInfo={remoteInfo}
             isRemoteChat={!!remoteInfo}
           />

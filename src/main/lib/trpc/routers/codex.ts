@@ -92,6 +92,7 @@ const providerSessions = new Map<string, CodexProviderSession>()
 type ActiveCodexStream = {
   runId: string
   controller: AbortController
+  cancelRequested: boolean
 }
 
 const activeStreams = new Map<string, ActiveCodexStream>()
@@ -1323,6 +1324,7 @@ export const codexRouter = router({
       return observable<any>((emit) => {
         const existingStream = activeStreams.get(input.subChatId)
         if (existingStream) {
+          existingStream.cancelRequested = true
           existingStream.controller.abort()
           // Ensure old run cannot continue emitting after supersede.
           cleanupProvider(input.subChatId)
@@ -1332,6 +1334,7 @@ export const codexRouter = router({
         activeStreams.set(input.subChatId, {
           runId: input.runId,
           controller: abortController,
+          cancelRequested: false,
         })
 
         let isActive = true
@@ -1384,6 +1387,43 @@ export const codexRouter = router({
               extractPromptFromStoredMessage(lastMessage) === input.prompt
 
             let messagesForStream = existingMessages
+            const isAuthoritativeRun = () => {
+              const currentStream = activeStreams.get(input.subChatId)
+              return !currentStream || currentStream.runId === input.runId
+            }
+
+            const persistSubChatMessages = (messages: any[]) => {
+              if (!isAuthoritativeRun()) {
+                return false
+              }
+
+              db.update(subChats)
+                .set({
+                  messages: JSON.stringify(messages),
+                  updatedAt: new Date(),
+                })
+                .where(eq(subChats.id, input.subChatId))
+                .run()
+              return true
+            }
+
+            const cleanAssistantMessageForPersistence = (message: any) => {
+              if (!message || message.role !== "assistant") return message
+              if (!Array.isArray(message.parts)) return message
+
+              const cleanedParts = message.parts.filter(
+                (part: any) => part?.state !== "input-streaming",
+              )
+
+              if (cleanedParts.length === 0) {
+                return null
+              }
+
+              return {
+                ...message,
+                parts: cleanedParts,
+              }
+            }
 
             if (!isDuplicatePrompt) {
               const userMessage = {
@@ -1481,15 +1521,24 @@ export const codexRouter = router({
 
                 return { model: metadataModel }
               },
-              onFinish: ({ messages }) => {
+              onFinish: ({ responseMessage, isContinuation }) => {
                 try {
-                  db.update(subChats)
-                    .set({
-                      messages: JSON.stringify(messages),
-                      updatedAt: new Date(),
-                    })
-                    .where(eq(subChats.id, input.subChatId))
-                    .run()
+                  const cleanedResponseMessage =
+                    cleanAssistantMessageForPersistence(responseMessage)
+
+                  if (!cleanedResponseMessage) {
+                    persistSubChatMessages(messagesForStream)
+                    return
+                  }
+
+                  const messagesToPersist = [
+                    ...(isContinuation
+                      ? messagesForStream.slice(0, -1)
+                      : messagesForStream),
+                    cleanedResponseMessage,
+                  ]
+
+                  persistSubChatMessages(messagesToPersist)
                 } catch (error) {
                   console.error("[codex] Failed to persist messages:", error)
                 }
@@ -1498,7 +1547,6 @@ export const codexRouter = router({
             })
 
             const reader = uiStream.getReader()
-
             while (true) {
               const { done, value } = await reader.read()
               if (done) break
@@ -1530,7 +1578,13 @@ export const codexRouter = router({
             safeEmit({ type: "finish" })
             safeComplete()
           } finally {
-            if (activeStreams.get(input.subChatId)?.runId === input.runId) {
+            const activeStream = activeStreams.get(input.subChatId)
+            if (activeStream?.runId === input.runId) {
+              const shouldCleanupProvider =
+                abortController.signal.aborted || activeStream.cancelRequested
+              if (shouldCleanupProvider) {
+                cleanupProvider(input.subChatId)
+              }
               activeStreams.delete(input.subChatId)
             }
           }
@@ -1540,8 +1594,9 @@ export const codexRouter = router({
           isActive = false
           abortController.abort()
 
-          if (activeStreams.get(input.subChatId)?.runId === input.runId) {
-            activeStreams.delete(input.subChatId)
+          const activeStream = activeStreams.get(input.subChatId)
+          if (activeStream?.runId === input.runId) {
+            activeStream.cancelRequested = true
           }
         }
       })
@@ -1564,10 +1619,8 @@ export const codexRouter = router({
         return { cancelled: false, ignoredStale: true }
       }
 
+      activeStream.cancelRequested = true
       activeStream.controller.abort()
-      // Authoritative stop for Codex: force teardown of provider session.
-      cleanupProvider(input.subChatId)
-      activeStreams.delete(input.subChatId)
 
       return { cancelled: true, ignoredStale: false }
     }),

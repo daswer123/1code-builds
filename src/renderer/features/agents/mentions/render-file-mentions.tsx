@@ -2,7 +2,8 @@
 
 import { createContext, useContext, useMemo } from "react"
 import { getFileIconByExtension } from "./agents-file-mention"
-import { FilesIcon, SkillIcon, CustomAgentIcon, OriginalMCPIcon } from "../../../components/ui/icons"
+import { SkillIcon, CustomAgentIcon, OriginalMCPIcon } from "../../../components/ui/icons"
+import { UnknownFileIcon } from "../../../icons/framework-icons"
 import { MENTION_PREFIXES } from "./agents-mentions-editor"
 import {
   HoverCard,
@@ -375,7 +376,7 @@ function MentionChip({ mention }: { mention: ParsedMention }) {
         ? OriginalMCPIcon
         : mention.type === "folder"
           ? FolderOpenIcon
-          : (getFileIconByExtension(mention.label) ?? FilesIcon)
+          : (getFileIconByExtension(mention.label) ?? UnknownFileIcon)
 
   const title = mention.type === "skill"
     ? `Skill: ${mention.label}`
